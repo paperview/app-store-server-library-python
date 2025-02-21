@@ -84,6 +84,78 @@ class ReceiptUtility:
             decoder.leave()
         return None
     
+    def extract_original_transaction_id_from_app_receipt(self, app_receipt: str) -> Optional[str]:
+        """
+        Extracts a transaction id from an encoded App Receipt. Throws if the receipt does not match the expected format.
+        *NO validation* is performed on the receipt, and any data returned should only be used to call the App Store Server API.
+
+        :param appReceipt: The unmodified app receipt
+        :return: A transaction id from the array of in-app purchases, null if the receipt contains no in-app purchases
+        """
+        decoder = IndefiniteFormAwareDecoder()
+        decoder.start(b64decode(app_receipt, validate=True))
+        tag = decoder.peek()
+        if tag.typ != asn1.Types.Constructed or tag.nr != asn1.Numbers.Sequence:
+            raise ValueError()
+        decoder.enter()
+        # PKCS#7 object
+        tag, value = decoder.read()
+        if tag.typ != asn1.Types.Primitive or tag.nr != asn1.Numbers.ObjectIdentifier or value != PKCS7_OID:
+            raise ValueError()
+        # This is the PKCS#7 format, work our way into the inner content
+        decoder.enter()
+        decoder.enter()
+        decoder.read()
+        decoder.read()
+        decoder.enter()
+        decoder.read()
+        decoder.enter()
+        tag, value = decoder.read()
+        # Xcode uses nested OctetStrings, we extract the inner string in this case
+        if tag.typ == asn1.Types.Constructed and tag.nr == asn1.Numbers.OctetString:
+            inner_decoder = asn1.Decoder()
+            inner_decoder.start(value)
+            tag, value = inner_decoder.read()
+        if tag.typ != asn1.Types.Primitive or tag.nr != asn1.Numbers.OctetString:
+            raise ValueError()
+        decoder = asn1.Decoder()
+        decoder.start(value)
+        tag = decoder.peek()
+        if tag.typ != asn1.Types.Constructed or tag.nr != asn1.Numbers.Set:
+            raise ValueError()
+        decoder.enter()
+        # We are in the top-level sequence, work our way to the array of in-apps
+        while not decoder.eof():
+            decoder.enter()
+            tag, value = decoder.read()
+            if tag.typ == asn1.Types.Primitive and tag.nr == asn1.Numbers.Integer and value == IN_APP_ARRAY:
+                decoder.read()
+                tag, value = decoder.read()
+                if tag.typ != asn1.Types.Primitive or tag.nr != asn1.Numbers.OctetString:
+                    raise ValueError()
+                inapp_decoder = asn1.Decoder()
+                inapp_decoder.start(value)
+                inapp_decoder.enter()
+                # In-app array
+                while not inapp_decoder.eof():
+                    inapp_decoder.enter()
+                    tag, value = inapp_decoder.read()
+                    if (
+                        tag.typ == asn1.Types.Primitive
+                        and tag.nr == asn1.Numbers.Integer
+                        and (value == ORIGINAL_TRANSACTION_IDENTIFIER)
+                    ):
+                        inapp_decoder.read()
+                        tag, value = inapp_decoder.read()
+                        singleton_decoder = asn1.Decoder()
+                        singleton_decoder.start(value)
+                        tag, value = singleton_decoder.read()
+                        return value
+                    inapp_decoder.leave()
+            decoder.leave()
+        return None
+
+
     def extract_transaction_id_from_transaction_receipt(self, transaction_receipt: str) -> Optional[str]:
         """
         Extracts a transaction id from an encoded transactional receipt. Throws if the receipt does not match the expected format.
